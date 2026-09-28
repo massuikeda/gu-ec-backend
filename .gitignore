@@ -1,0 +1,12 @@
+# ローカル環境の設定（パスワード等を含むためコミットしない）
+.env
+
+# ローカル開発用SQLiteのDBファイル
+*.db
+*.db-journal
+
+# Python
+__pycache__/
+.pytest_cache/
+venv/
+.venv/
