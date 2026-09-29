@@ -23,10 +23,11 @@ _store() でモジュールを選んで同じ関数を呼ぶだけで切り替�
 
 from __future__ import annotations
 
+import threading
 import uuid
 
 from app import database
-from app.records import CartItemRecord, ProductRecord, VariationRecord
+from app.records import CartItemRecord, ProductRecord, QuantityExceedsLimitError, VariationRecord
 
 # --- ローカル簡易モード用のダミーデータ ------------------------------------
 # Frontend側 data/dummyProducts.ts と同じ商品・SKU構成。
@@ -59,6 +60,9 @@ PRODUCTS: dict[str, ProductRecord] = {_PRODUCT.product_id: _PRODUCT}
 
 # cart_id -> cart_item_id -> CartItemRecord （ローカル簡易モードのみで使用）
 CART_STORE: dict[str, dict[str, CartItemRecord]] = {}
+
+# インメモリモードで add_quantity を同時実行しても上限を超えないようにするためのロック
+_CART_LOCK = threading.Lock()
 
 
 def new_cart_id() -> str:
@@ -165,3 +169,29 @@ def delete_cart_item(cart_id: str, cart_item_id: str) -> bool:
         return False
     del cart[cart_item_id]
     return True
+
+
+def add_quantity(cart_id: str, sku_id: str, quantity: int, max_quantity: int) -> CartItemRecord:
+    """カートに数量を追加する（既に同じSKUがあれば数量を加算）。
+
+    「カート内の現在数量を読む → 上限チェック → 保存」を1つの排他区間で行う。
+    別々に呼ぶと、同時に届いた2つのリクエストがどちらも「まだ0個」と判断して
+    両方保存され、上限（在庫数）を超えてしまうため（テスト仕様書 DATA-03）。
+
+    上限を超える場合は QuantityExceedsLimitError を送出し、何も保存しない。
+    """
+    store = _store()
+    if store is not None:
+        return store.add_quantity(cart_id, sku_id, quantity, max_quantity, new_cart_item_id())
+    with _CART_LOCK:
+        existing = find_cart_item_by_sku(cart_id, sku_id)
+        new_total = quantity + (existing.quantity if existing else 0)
+        if new_total > max_quantity:
+            raise QuantityExceedsLimitError()
+        item = CartItemRecord(
+            cart_item_id=existing.cart_item_id if existing else new_cart_item_id(),
+            sku_id=sku_id,
+            quantity=new_total,
+        )
+        CART_STORE.setdefault(cart_id, {})[item.cart_item_id] = item
+        return item

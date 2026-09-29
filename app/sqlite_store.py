@@ -16,7 +16,7 @@ from __future__ import annotations
 import pathlib
 
 from app import database
-from app.records import CartItemRecord, ProductRecord, VariationRecord
+from app.records import CartItemRecord, ProductRecord, QuantityExceedsLimitError, VariationRecord
 
 SCHEMA_PATH = database.PROJECT_ROOT / "schema_sqlite.sql"
 
@@ -223,5 +223,51 @@ def delete_cart_item(cart_id: str, cart_item_id: str) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def add_quantity(
+    cart_id: str, sku_id: str, quantity: int, max_quantity: int, new_cart_item_id: str
+) -> CartItemRecord:
+    """カート内数量の読み取り・上限チェック・保存を1トランザクションで行う（app/data.py参照）。
+
+    BEGIN IMMEDIATE で書き込みロックを先に取るため、同時に来た別のリクエストは
+    このトランザクションが終わるまで待たされ、必ず最新の数量を見て判定する。
+    """
+    conn = database.get_sqlite_connection()
+    conn.isolation_level = None  # トランザクションを自分で制御する
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT cart_item_id, quantity FROM cart_item WHERE cart_id = ? AND sku_id = ?",
+            (cart_id, sku_id),
+        ).fetchone()
+        new_total = quantity + (row["quantity"] if row else 0)
+        if new_total > max_quantity:
+            conn.execute("ROLLBACK")
+            raise QuantityExceedsLimitError()
+
+        if row:
+            cart_item_id = row["cart_item_id"]
+            conn.execute(
+                "UPDATE cart_item SET quantity = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE cart_item_id = ?",
+                (new_total, cart_item_id),
+            )
+        else:
+            cart_item_id = new_cart_item_id
+            conn.execute(
+                "INSERT INTO cart_item (cart_item_id, cart_id, sku_id, quantity) VALUES (?, ?, ?, ?)",
+                (cart_item_id, cart_id, sku_id, new_total),
+            )
+        conn.execute("COMMIT")
+        return CartItemRecord(cart_item_id=cart_item_id, sku_id=sku_id, quantity=new_total)
+    except QuantityExceedsLimitError:
+        raise
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()

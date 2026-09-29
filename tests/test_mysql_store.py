@@ -135,3 +135,36 @@ def test_delete_cart_item_returns_false_when_no_row_matched():
         deleted = mysql_store.delete_cart_item("cart-1", "does-not-exist")
 
     assert deleted is False
+
+
+def test_add_quantity_locks_sku_row_and_inserts_new_item():
+    cursor = FakeCursor(fetchone_results=[None])  # カートにまだ無い
+    conn = FakeConnection(cursor)
+    conn.rolled_back = False
+    conn.rollback = lambda: setattr(conn, "rolled_back", True)
+
+    with patch.object(mysql_store.database, "get_connection", return_value=conn):
+        item = mysql_store.add_quantity("cart-1", "sku-001", 2, 5, "ci-new")
+
+    assert "FOR UPDATE" in cursor.queries[0][0]  # 先にSKU行をロックする
+    assert cursor.queries[-1][0].startswith("INSERT INTO cart_item")
+    assert item.cart_item_id == "ci-new" and item.quantity == 2
+    assert conn.committed is True and conn.rolled_back is False
+
+
+def test_add_quantity_rolls_back_when_over_limit():
+    import pytest
+
+    from app.records import QuantityExceedsLimitError
+
+    cursor = FakeCursor(fetchone_results=[{"cart_item_id": "ci-1", "quantity": 4}])
+    conn = FakeConnection(cursor)
+    conn.rolled_back = False
+    conn.rollback = lambda: setattr(conn, "rolled_back", True)
+
+    with patch.object(mysql_store.database, "get_connection", return_value=conn):
+        with pytest.raises(QuantityExceedsLimitError):
+            mysql_store.add_quantity("cart-1", "sku-001", 2, 5, "ci-new")
+
+    assert conn.rolled_back is True and conn.committed is False
+    assert not any(q[0].startswith(("INSERT", "UPDATE")) for q in cursor.queries)

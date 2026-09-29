@@ -114,24 +114,18 @@ def add_cart_item(
     if is_new_cart:
         cart_id = data.new_cart_id()
 
-    existing = data.find_cart_item_by_sku(cart_id, body.sku_id)
-    new_total_quantity = body.quantity + (existing.quantity if existing else 0)
-
-    if new_total_quantity > max_quantity:
+    # 「カート内の数量＋今回の数量」の上限チェックと保存は、同時実行でも上限を超えないよう
+    # data.add_quantity の中で1つのトランザクション（排他）として行う。
+    try:
+        saved = data.add_quantity(cart_id, body.sku_id, body.quantity, max_quantity)
+    except data.QuantityExceedsLimitError:
         raise _error(
             422,
             "QUANTITY_EXCEEDS_LIMIT",
             f"数量が上限（{max_quantity}）を超えています（在庫数と運用上限99のうち小さい方）",
         )
-
-    # 既存行があれば同じcart_item_idで数量を上書き、無ければ新規行として保存する。
-    # （以前は既存行の場合にオブジェクトの値を書き換えるだけでDBへ保存しておらず、
-    #   インメモリモードでしか数量が増えなかったため、必ず upsert_cart_item を呼ぶようにした）
-    cart_item_id = existing.cart_item_id if existing else data.new_cart_item_id()
-    data.upsert_cart_item(
-        cart_id,
-        data.CartItemRecord(cart_item_id=cart_item_id, sku_id=body.sku_id, quantity=new_total_quantity),
-    )
+    cart_item_id = saved.cart_item_id
+    new_total_quantity = saved.quantity
 
     if is_new_cart:
         response.set_cookie(

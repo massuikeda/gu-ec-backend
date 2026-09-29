@@ -121,3 +121,38 @@ def test_api_quantity_changes_are_saved_on_sqlite(sqlite_db):
         res = client.patch(f"/api/cart/items/{item_id}", json={"quantity": 6})
         assert res.status_code == 422
         assert client.get("/api/cart").json()["cartTotalQuantity"] == 2
+
+
+def test_add_quantity_is_safe_under_concurrency(sqlite_db):
+    """同じカート・同じSKUへの追加が同時に来ても、合計が上限を超えず、明細も1行にまとまること。
+
+    （テスト仕様書 DATA-03。修正前は「読む→チェック→保存」が別々だったため、
+     在庫5に3個×2を同時に送ると両方成功して6個・2行になることがあった）
+    """
+    import threading
+
+    from app.records import QuantityExceedsLimitError
+
+    for trial in range(10):
+        cart_id = f"race-{trial}"
+        results: list[str] = []
+        barrier = threading.Barrier(4)
+
+        def worker(i: int) -> None:
+            barrier.wait()
+            try:
+                sqlite_store.add_quantity(cart_id, "sku-001", 3, 5, f"{cart_id}-item-{i}")
+                results.append("ok")
+            except QuantityExceedsLimitError:
+                results.append("limit")
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        items = sqlite_store.get_cart_items(cart_id)
+        assert results.count("ok") == 1
+        assert len(items) == 1
+        assert items[0].quantity == 3

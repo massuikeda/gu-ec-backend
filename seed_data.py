@@ -30,8 +30,14 @@ from app import data, database
 def _run_schema(conn) -> None:
     schema_path = pathlib.Path(__file__).parent / "schema.sql"
     sql_text = schema_path.read_text(encoding="utf-8")
-    # 素朴に ";" で分割する（スキーマ内にストアドプロシージャ等は無い前提）。
-    statements = [s.strip() for s in sql_text.split(";") if s.strip() and not s.strip().startswith("--")]
+    # 先に「--」で始まるコメント行を取り除いてから ";" で分割する。
+    # （コメント内にも「source schema.sql;」等の ";" があるため、先に分割すると
+    #   コメントの途中で文が切れて構文エラー（1064）になる）
+    # ※ スキーマ内にストアドプロシージャや、文字列リテラル内の ";" は無い前提。
+    sql_without_comments = "\n".join(
+        line for line in sql_text.splitlines() if not line.lstrip().startswith("--")
+    )
+    statements = [s.strip() for s in sql_without_comments.split(";") if s.strip()]
     with conn.cursor() as cur:
         for statement in statements:
             cur.execute(statement)

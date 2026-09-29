@@ -37,6 +37,10 @@ class ProductRecord:
     variations: list[VariationRecord] = field(default_factory=list)
 
 
+class QuantityExceedsLimitError(Exception):
+    """カート内数量＋追加数量が上限を超える場合に、各ストアの add_quantity が送出する。"""
+
+
 @dataclass
 class CartItemRecord:
     cart_item_id: str

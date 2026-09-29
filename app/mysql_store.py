@@ -12,7 +12,7 @@ routers/ 側は DB_BACKEND が memory/sqlite/mysql のどれでも app.data の�
 from __future__ import annotations
 
 from app import database
-from app.records import CartItemRecord, ProductRecord, VariationRecord
+from app.records import CartItemRecord, ProductRecord, QuantityExceedsLimitError, VariationRecord
 
 
 def _row_to_variation(row: dict) -> VariationRecord:
@@ -160,5 +160,54 @@ def delete_cart_item(cart_id: str, cart_item_id: str) -> bool:
             deleted = cur.rowcount > 0
         conn.commit()
         return deleted
+    finally:
+        conn.close()
+
+
+def add_quantity(
+    cart_id: str, sku_id: str, quantity: int, max_quantity: int, new_cart_item_id: str
+) -> CartItemRecord:
+    """カート内数量の読み取り・上限チェック・保存を1トランザクションで行う（app/data.py参照）。
+
+    対象SKUの product_variation 行を SELECT ... FOR UPDATE でロックすることで、
+    同じSKUへの追加リクエストを順番に処理させる（InnoDBの行ロック）。
+    """
+    conn = database.get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT sku_id FROM product_variation WHERE sku_id = %s FOR UPDATE",
+                (sku_id,),
+            )
+            cur.execute(
+                "SELECT cart_item_id, quantity FROM cart_item WHERE cart_id = %s AND sku_id = %s",
+                (cart_id, sku_id),
+            )
+            row = cur.fetchone()
+            new_total = quantity + (row["quantity"] if row else 0)
+            if new_total > max_quantity:
+                conn.rollback()
+                raise QuantityExceedsLimitError()
+
+            if row:
+                cart_item_id = row["cart_item_id"]
+                cur.execute(
+                    "UPDATE cart_item SET quantity = %s WHERE cart_item_id = %s",
+                    (new_total, cart_item_id),
+                )
+            else:
+                cart_item_id = new_cart_item_id
+                cur.execute(
+                    "INSERT INTO cart_item (cart_item_id, cart_id, sku_id, quantity) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (cart_item_id, cart_id, sku_id, new_total),
+                )
+        conn.commit()
+        return CartItemRecord(cart_item_id=cart_item_id, sku_id=sku_id, quantity=new_total)
+    except QuantityExceedsLimitError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
